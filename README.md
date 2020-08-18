@@ -54,7 +54,7 @@ Usage:
 2020/08/16 10:20:55 Creating key: my-test-creds/19fe7368-c6b3-45c8-873b-d358de56453a
 
 > ./run
-2020/08/16 10:20:52 Backup is current for  my-test-creds
+2020/08/16 10:20:59 Backup is current for  my-test-creds
 ```
 
 ## Check backup contents
