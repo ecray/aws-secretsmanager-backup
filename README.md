@@ -64,13 +64,16 @@ Usage:
 }
 
 > ./run
-2020/08/16 10:20:52 Backup is current for  my-test-creds
+2020/08/16 10:20:55 Creating key: my-test-creds/19fe7368-c6b3-45c8-873b-d358de56453a
+
+> ./run
+2020/08/16 10:20:59 Backup is current for  my-test-creds
 ```
 
 ## Check backup contents
 ```
 > aws s3 ls secondary-backup-aebef/my-test-creds/
-2020-08-16 10:20:50         30 19fe7368-c6b3-45c8-873b-d358de56453a
+2020-08-16 10:20:56         30 19fe7368-c6b3-45c8-873b-d358de56453a
 2020-08-16 10:20:42         30 d57bd1f1-7a49-46f7-928e-e8a7c39902d4
 
 > aws s3 cp s3://secondary-backup-aebef/my-test-creds/19fe7368-c6b3-45c8-873b-d358de56453a 19fe7368-c6b3-45c8-873b-d358de56453a
