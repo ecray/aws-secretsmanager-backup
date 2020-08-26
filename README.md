@@ -3,6 +3,16 @@
 This tool backs up the AWSCURRENT label in SecretsManager to an s3 bucket to allow for the 
 possibility of restoring previous versions beyond the AWSPREVIOUS label (current + 1).
 
+### AWS Permissions
+```
+kms:Decrypt
+secretsmanager:ListSecrets
+secretsmanager:ListSecretVersionIds
+secretsmanager:GetSecretValue
+s3:Get*
+s3:List*
+s3:Put*
+```
 ## Usage
 ```
 Usage:
@@ -10,6 +20,9 @@ Usage:
         AWS S3 Bucket
   -region string
         AWS region
+  -role
+        Use AWS EC2 Instance Profile
+
 ```
 ### You can also export environment variables
 ```

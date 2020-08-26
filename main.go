@@ -4,34 +4,26 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/credentials/ec2rolecreds"
+	"github.com/aws/aws-sdk-go/aws/ec2metadata"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/aws/aws-sdk-go/service/secretsmanager"
 	"io"
 	"log"
 	"os"
 	"strings"
-
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/secretsmanager"
 )
-
-
-/*
-AWS permissions needed
-secretsmanager:ListSecrets
-secretsmanager:ListSecretVersionIds
-secretsmanager:GetSecretValue
-kms:Decrypt
-s3:Write
-*/
 
 type AwsClient struct {
 	Acct AwsAccount
 	SecretsManager  *secretsmanager.SecretsManager
 	s3Client *s3.S3
+	s3Uploader *s3manager.Uploader
 	Bucket string
 }
 
@@ -40,6 +32,7 @@ type AwsAccount struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	Session         *session.Session
+	Role            bool
 }
 
 type Secret struct {
@@ -56,6 +49,7 @@ func init() {
 
 	flagset.StringVar(&client.Acct.Region, "region", os.Getenv("AWS_REGION"), "AWS region")
 	flagset.StringVar(&client.Bucket, "bucket", os.Getenv("AWS_S3_BUCKET"), "AWS S3 Bucket")
+	flagset.BoolVar(&client.Acct.Role, "role", false, "Use AWS EC2 Instance Profile")
 
 	flagset.Parse(os.Args[1:])
 }
@@ -66,41 +60,50 @@ func main() {
 }
 
 func Main() int {
-	client.initSmClient()
+
+	// Create session
+	client.awsConfig()
+
+	client.SecretsManager = secretsmanager.New(client.Acct.Session)
 
 	// Fetch list of secrets
-	sm, err := client.SecretsManager.ListSecrets(&secretsmanager.ListSecretsInput{})
+	smList, err := client.getSecretsList()
 	if err != nil {
-		if awsErr, ok := err.(awserr.Error); ok {
-			// Get error details
-			log.Fatalln("Error:", awsErr.Code(), awsErr.Message())
-		}
+		log.Fatalln(err)
 	}
 
-	if sm.SecretList == nil {
-		log.Fatalln("No secrets found. Verify account and permissions.")
-	}
+	client.s3Client = s3.New(client.Acct.Session)
 
-	client.initS3Client()
-	for _, s := range sm.SecretList {
+	for _, s := range smList {
 		var secret Secret
 
 		input := &secretsmanager.GetSecretValueInput{
-			SecretId:     aws.String(*s.Name),
+			SecretId:     aws.String(s),
 			VersionStage: aws.String("AWSCURRENT"),
 		}
 
 		// Get SecretString for each value in list
-		secret.Content , err = client.SecretsManager.GetSecretValue(input)
+		secret.Content, err = client.SecretsManager.GetSecretValue(input)
+		// Log error, and continue to next secret
+		// This should handle secrets that have no value
+		// and other failures that are not fatal
 		if err != nil {
-			log.Fatalf("Failed to fetch secret %v\n", *s.Name)
+			if aerr, ok := err.(awserr.Error); ok {
+				switch aerr.Code() {
+				case secretsmanager.ErrCodeResourceNotFoundException:
+					log.Println("Error fetching", s, aerr.Error())
+				default:
+					log.Println(aerr.Error())
+				}
+			}
+			continue
 		}
 
 		// Build key string ie my-secret/aaa-bbb-ccc-ddd
 		secret.Key = strings.Join([]string{*secret.Content.Name, *secret.Content.VersionId}, "/")
 
 		// Check s3 bucket and prefix exist
-		objList, err := client.getObjectsList(*s.Name)
+		objList, err := client.getObjectsList(s)
 
 		if err != nil {
 			log.Fatalln(err)
@@ -110,7 +113,7 @@ func Main() int {
 		found := false
 		for _, o := range objList {
 			if o == secret.Key {
-				log.Println("Backup is current for ", *s.Name)
+				log.Println("Backup is current for ", s)
 				found = true
 				break
 			}
@@ -124,30 +127,70 @@ func Main() int {
 		}
 	}
 
+	log.Println("Backup job completed.")
+
 	return 0
 }
 
-func (c *AwsClient) initSmClient() {
-	// session.Must handles setup for creating a valid session
-	sess := session.Must(session.NewSession(&aws.Config{
-		Credentials:      credentials.NewEnvCredentials(),
-	}))
+func (c *AwsClient) awsConfig() {
+	// Create valid AWS session
+	var creds *credentials.Credentials
 
-	c.SecretsManager = secretsmanager.New(sess)
-}
+	// Check if ec2 role is true
+	// else check ENV
+	if c.Acct.Role {
+		sess := session.Must(session.NewSession())
+		p := &ec2rolecreds.EC2RoleProvider{
+			Client: ec2metadata.New(sess),
+			// Do not use early expiry of credentials. If a non zero value is
+			// specified the credentials will be expired early
+			ExpiryWindow: 0,
+		}
+		creds = credentials.NewCredentials(p)
+	} else {
+		creds = credentials.NewEnvCredentials()
+	}
 
-func (c *AwsClient) initS3Client() {
 	// session.Must handles setup for creating a valid session
-	sess := session.Must(session.NewSession(&aws.Config{
-		Credentials:      credentials.NewEnvCredentials(),
+	c.Acct.Session = session.Must(session.NewSession(&aws.Config{
+		Credentials:      creds,
 		S3ForcePathStyle: aws.Bool(true),
 	}))
+}
 
-	c.s3Client = s3.New(sess)
+func (c *AwsClient) getSecretsList() ([]string, error) {
+	var smList []string
+
+	lsi := &secretsmanager.ListSecretsInput{}
+	err := client.SecretsManager.ListSecretsPages(lsi,
+		func(page *secretsmanager.ListSecretsOutput, lastPage bool) bool {
+			var nextPage bool = false
+			for _, p := range page.SecretList {
+				smList = append(smList, *p.Name)
+			}
+
+			if page.NextToken != nil {
+				lsi.SetNextToken(*page.NextToken)
+				nextPage = true
+			}
+			return nextPage
+		})
+
+	if err != nil {
+		if awsErr, ok := err.(awserr.Error); ok {
+			// Get error details
+			return smList, fmt.Errorf("Error Code: %v Message: %v\n", awsErr.Code(), awsErr.Message())
+		}
+	}
+
+	if len(smList) == 0 {
+		return smList, fmt.Errorf(("No secrets found. Verify account and permissions."))
+	}
+
+	return smList, nil
 }
 
 func (c *AwsClient) getObjectsList(prefix string) ([]string, error) {
-	//StartAfter might be helpful for time-based retrieval
 	var files []string
 
 	req := &s3.ListObjectsV2Input{Bucket: aws.String(c.Bucket), Prefix: aws.String(prefix)}
@@ -164,22 +207,14 @@ func (c *AwsClient) getObjectsList(prefix string) ([]string, error) {
 }
 
 func (c *AwsClient) uploadSecret(s Secret) error {
-	// Setup the S3 Upload Manager. Also see the SDK doc for the Upload Manager
-	// for more information on configuring part size, and concurrency.
-	// http://docs.aws.amazon.com/sdk-for-go/api/service/s3/s3manager/#NewUploader
-
-	sess := session.Must(session.NewSession(&aws.Config{
-		Credentials:      credentials.NewEnvCredentials(),
-		S3ForcePathStyle: aws.Bool(true),
-	}))
-
-	uploader := s3manager.NewUploader(sess, func(u *s3manager.Uploader) {
+	// Chunk uploads
+	c.s3Uploader = s3manager.NewUploader(c.Acct.Session, func(u *s3manager.Uploader) {
 		u.PartSize = 64 * 1024 * 1024 // 64MB per part
 		})
 
 	// Convert string using bytes Reader to use with io.ReadSeeker Reader interface
 	f := bytes.NewReader([]byte(*s.Content.SecretString))
-	_, err := uploader.Upload(&s3manager.UploadInput{
+	_, err := c.s3Uploader.Upload(&s3manager.UploadInput{
 		Bucket: aws.String(c.Bucket),
 		Key: aws.String(s.Key),
 		Body: io.ReadSeeker(f),
