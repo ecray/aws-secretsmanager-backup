@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/credentials/ec2rolecreds"
-	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
@@ -29,10 +26,7 @@ type AwsClient struct {
 
 type AwsAccount struct {
 	Region          string
-	AccessKeyID     string
-	SecretAccessKey string
 	Session         *session.Session
-	Role            bool
 }
 
 type Secret struct {
@@ -49,7 +43,6 @@ func init() {
 
 	flagset.StringVar(&client.Acct.Region, "region", os.Getenv("AWS_REGION"), "AWS region")
 	flagset.StringVar(&client.Bucket, "bucket", os.Getenv("AWS_S3_BUCKET"), "AWS S3 Bucket")
-	flagset.BoolVar(&client.Acct.Role, "role", false, "Use AWS EC2 Instance Profile")
 
 	flagset.Parse(os.Args[1:])
 }
@@ -134,27 +127,12 @@ func Main() int {
 
 func (c *AwsClient) awsConfig() {
 	// Create valid AWS session
-	var creds *credentials.Credentials
-
-	// Check if ec2 role is true
-	// else check ENV
-	if c.Acct.Role {
-		sess := session.Must(session.NewSession())
-		p := &ec2rolecreds.EC2RoleProvider{
-			Client: ec2metadata.New(sess),
-			// Do not use early expiry of credentials. If a non zero value is
-			// specified the credentials will be expired early
-			ExpiryWindow: 0,
-		}
-		creds = credentials.NewCredentials(p)
-	} else {
-		creds = credentials.NewEnvCredentials()
-	}
-
-	// session.Must handles setup for creating a valid session
-	c.Acct.Session = session.Must(session.NewSession(&aws.Config{
-		Credentials:      creds,
-		S3ForcePathStyle: aws.Bool(true),
+	c.Acct.Session = session.Must(session.NewSessionWithOptions(session.Options{
+		// Without this thing, OIDC roles don't work
+		SharedConfigState: session.SharedConfigEnable,
+		Config: aws.Config{
+			S3ForcePathStyle: aws.Bool(true),
+		},
 	}))
 }
 
